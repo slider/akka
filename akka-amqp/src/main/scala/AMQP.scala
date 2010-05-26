@@ -195,11 +195,12 @@ object AMQP {
                                 val exclusive: Boolean,
                                 val autoDelete: Boolean,
                                 val isUsingExistingQueue: Boolean,
+                                val explicitAck: Boolean,
                                 val actor: ActorRef) extends AMQPMessage {
     /**
      * Creates a non-exclusive, non-autodelete message listener.
      */
-    def this(queueName: String, routingKey: String, actor: ActorRef) = this (queueName, routingKey, false, false, false, actor)
+    def this(queueName: String, routingKey: String, actor: ActorRef) = this (queueName, routingKey, false, false, false, false, actor)
 
     private[akka] var tag: Option[String] = None
 
@@ -210,7 +211,8 @@ object AMQP {
           ", tag=" + tag +
           ", exclusive=" + exclusive +
           ", autoDelete=" + autoDelete +
-          ", isUsingExistingQueue=" + isUsingExistingQueue + "]"
+          ", isUsingExistingQueue=" + isUsingExistingQueue +
+          ", explicitAck=" + explicitAck + "]"
 
     def toString(exchangeName: String) =
       "MessageConsumerListener[actor=" + actor +
@@ -220,7 +222,8 @@ object AMQP {
           ", tag=" + tag +
           ", exclusive=" + exclusive +
           ", autoDelete=" + autoDelete +
-          ", isUsingExistingQueue=" + isUsingExistingQueue + "]"
+          ", isUsingExistingQueue=" + isUsingExistingQueue +
+          ", explicitAck=" + explicitAck + "]"
 
     /**
      * Hash code should only be based on on queue name and routing key.
@@ -248,16 +251,19 @@ object AMQP {
               exclusive: Boolean,
               autoDelete: Boolean,
               isUsingExistingQueue: Boolean,
+              explicitAck: Boolean,
               actor: ActorRef) =
-      new MessageConsumerListener(queueName, routingKey, exclusive, autoDelete, isUsingExistingQueue, actor)
+      new MessageConsumerListener(queueName, routingKey, exclusive, autoDelete, isUsingExistingQueue, explicitAck, actor)
 
     def apply(queueName: String,
               routingKey: String,
               actor: ActorRef) =
-      new MessageConsumerListener(queueName, routingKey, false, false, false, actor)
+      new MessageConsumerListener(queueName, routingKey, false, false, false, false, actor)
   }
 
   case object Stop extends AMQPMessage
+  
+  case class Ack(deliveryTag: Long) extends AMQPMessage
 
   private[akka] case class UnregisterMessageConsumerListener(consumer: MessageConsumerListener) extends InternalAMQPMessage
 
@@ -405,6 +411,9 @@ object AMQP {
       case Failure(cause) =>
         log.error(cause, "Error in AMQP consumer")
         throw cause
+        
+      case Ack(deliveryTag) =>
+        ackMessage(deliveryTag)
 
       case Stop =>
         listeners.iterator.toList.map(_._2).foreach(unregisterListener(_))
@@ -454,9 +463,12 @@ object AMQP {
             val immediate = false // FIXME: where to find out if it's immediate?
             log.debug("Passing a message on to the MessageConsumerListener [%s]", listener.toString(exchangeName))
             listener.actor ! Message(payload, envelope.getRoutingKey, mandatory, immediate, properties)
-            val deliveryTag = envelope.getDeliveryTag
-            log.debug("Acking message with delivery tag [%s]", deliveryTag)
-            channel.basicAck(deliveryTag, false)
+            if (!listener.explicitAck) {
+              //FIXME: Avoid consumer starvation
+              val deliveryTag = envelope.getDeliveryTag
+              log.debug("Acking message with delivery tag [%s]", deliveryTag)
+              channel.basicAck(deliveryTag, false)
+            }
           } catch {
             case cause =>
               log.error(
@@ -504,6 +516,10 @@ object AMQP {
               log.debug("Message consumer is cancelled and shut down [%s]", listener)
           }
       }
+    }
+    
+    private def ackMessage(deliveryTag: Long) = {
+      channel.basicAck(deliveryTag, false)
     }
 
     private def handleIllegalMessage(errorMessage: String) = {
